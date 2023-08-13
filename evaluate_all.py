@@ -16,7 +16,7 @@ from collision_net import CollisionNet
 import argparse
 import random
 from str2name import str2name
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
 
 parser = argparse.ArgumentParser()
@@ -49,6 +49,20 @@ model_coll.load_state_dict(torch.load(model_coll_path, map_location=device))
 
 model_astar = model_astar.to(device)
 model_coll = model_coll.to(device)
+
+def lvc(path, environment, states):
+    for i in range(0,len(path)-1):
+        for j in range(len(path)-1,i+1,-1):
+            if environment._edge_fp(states[path[i]], states[path[j]]):
+                pc=[]
+                for k in range(0,i+1):
+                    pc.append(path[k])
+                for k in range(j,len(path)):
+                    pc.append(path[k])
+
+                return lvc(pc, environment, states)
+                
+    return path
 
 
 def construct_graph(env, points, k=5, check_collision=True):
@@ -119,9 +133,10 @@ for index in pbar:
 
     env.init_new_problem(index)
     points = env.sample_n_points(n=n_sample-2)
-    all_states = np.copy(points)
+    
     points.insert(0, env.init_state)
     points.insert(0, env.goal_state)
+    all_states = np.copy(points)
     start_index = 1
     goal_index = 0
     edge_cost, edge_index, points = construct_graph(env, points, n_neighbor)
@@ -161,7 +176,36 @@ for index in pbar:
     if pred_ordered_path: #if the results are not empty
         pred_ordered_path = torch.stack(pred_ordered_path).cpu().detach().numpy()
     pred_ordered_path = np.concatenate((pred_ordered_path, np.array([goal_index])), axis=0) 
-    print ('The computed path is: ', pred_ordered_path)
+    
+
+    for k in range(10):
+        collision_checks = True
+        # if not (start_index == goal_index).all():
+        if pred_ordered_path.shape[0] > 1 and pred_path[start_index]: #the start is different from goal
+            path_states = all_states[pred_ordered_path]
+        
+            for n in range(pred_ordered_path.shape[0]-1):
+                if not env._edge_fp(path_states[n], path_states[n+1]):
+                    # print ('Collision between {} and {} happens in {}th iteration'.format(path_states[n], path_states[n+1], n))
+                    collision_checks = False
+                    break
+        else:
+            break
+
+        if collision_checks: 
+            rewired_path = np.array(lvc(pred_ordered_path, env, all_states))
+            print ('The computed path is: ', pred_ordered_path)
+            print ('The optimized path is: ', rewired_path)
+            break
+        else:
+            node_free[pred_ordered_path[n], pred_ordered_path[n+1]] = 0
+            node_free[pred_ordered_path[n+1], pred_ordered_path[n]] = 0
+            edge_free_index = torch.nonzero(node_free).T
+            open_list, pred_history, pred_path, pred_ordered_path = model_astar(start_index, goal_index, points, edge_free_index, node_free, cost_maps, current_loop, labels)
+
+            pred_ordered_path = torch.stack(pred_ordered_path).cpu().detach().numpy()
+            pred_ordered_path = np.concatenate((pred_ordered_path, np.array([goal_index])), axis=0)
+
 
     if pred_path[start_index]:
         path_cost_astar = compute_pathcost(pred_ordered_path, all_states)
